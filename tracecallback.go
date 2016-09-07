@@ -69,7 +69,7 @@ type TraceUserCallback func(TraceInfo) int
 
 type TraceConfig struct {
 	Callback        TraceUserCallback
-	EventMask       uint
+	EventMask       uint32
 	WantExpandedSQL bool
 }
 
@@ -124,6 +124,15 @@ func traceCallbackTrampoline(
 			connHandle, traceEventCode))
 	}
 
+	// Do not execute user callback when the event was not requested by user!
+	// Remember that the Close event is always selected when
+	// registering this callback trampoline with SQLite --- for cleanup.
+	// In the future there may be more events forced to "selected" in SQLite
+	// for the driver's needs.
+	if (traceConf.EventMask & uint32(traceEventCode)) == 0 {
+		return 0
+	}
+
 	var info TraceInfo
 
 	info.EventCode = uint32(traceEventCode)
@@ -164,6 +173,9 @@ func traceCallbackTrampoline(
 	case TraceRow:
 		info.StmtHandle = uintptr(p)
 
+		// sample the error //TODO: is it safe? is it useful?
+		fillDBError(&info.DBError, contextDB)
+
 	case TraceClose:
 		handle := uintptr(p)
 		if handle != info.ConnHandle {
@@ -174,15 +186,6 @@ func traceCallbackTrampoline(
 	default:
 		// Pass unsupported events to the user callback (if configured);
 		// let the user callback decide whether to panic or ignore them.
-	}
-
-	// Do not execute user callback when the event was not requested by user!
-	// Remember that the Close event is always selected when
-	// registering this callback trampoline with SQLite --- for cleanup.
-	// In the future there may be more events forced to "selected" in SQLite
-	// for the driver's needs.
-	if traceConf.EventMask&traceEventCode == 0 {
-		return 0
 	}
 
 	r := 0

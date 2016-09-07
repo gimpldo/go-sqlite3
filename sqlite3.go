@@ -526,7 +526,7 @@ func (c *SQLiteConn) SetTrace(requested *TraceConfig) error {
 
 	_, _ = popTraceMapping(connHandle)
 
-	if requested == nil {
+	if requested == nil || requested.EventMask == 0 || requested.Callback == nil {
 		// The traceMap entry was deleted already by popTraceMapping():
 		// can disable all events now, no need to watch for TraceClose.
 		err := c.setSQLiteTrace(0)
@@ -552,7 +552,7 @@ func (c *SQLiteConn) SetTrace(requested *TraceConfig) error {
 	return err
 }
 
-func (c *SQLiteConn) setSQLiteTrace(sqliteEventMask uint) error {
+func (c *SQLiteConn) setSQLiteTrace(sqliteEventMask uint32) error {
 	rv := C.sqlite3_trace_v2(c.db,
 		C.uint(sqliteEventMask),
 		(*[0]byte)(unsafe.Pointer(C.traceCallbackTrampoline)),

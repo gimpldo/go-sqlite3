@@ -13,6 +13,17 @@ func traceCallback(info sqlite3.TraceInfo) int {
 	// Not very readable but may be useful; uncomment next line in case of doubt:
 	//fmt.Printf("Trace: %#v\n", info)
 
+	// Suggestions for trace formatting
+	//
+	// DO NOT show only the fields that should be set (per spec),
+	// show what *is* in the current instance, regardless of event/type code!
+	//
+	// Formatting decisions should be as local as possible,
+	// that is, based on the value of the field you are printing and
+	// maybe a closely related field.
+	// Most of the time it's better to avoid formatting decisions based
+	// on the record's type code ('EventCode' in this case).
+
 	var dbErrText string
 	if info.DBError.Code != 0 || info.DBError.ExtendedCode != 0 {
 		dbErrText = fmt.Sprintf("; DB error: %#v", info.DBError)
@@ -34,6 +45,13 @@ func traceCallback(info sqlite3.TraceInfo) int {
 	// suggest that there is a bug in the application.
 	// The braces are likely to be either template syntax or
 	// a programming language's string interpolation syntax.
+
+	var stmtOrTrigText string
+	if info.StmtOrTrigger != "" {
+		stmtOrTrigText = fmt.Sprintf(" {%q}", info.StmtOrTrigger)
+	} else {
+		stmtOrTrigText = ""
+	}
 
 	var expandedText string
 	if info.ExpandedSQL != "" {
@@ -79,9 +97,9 @@ func traceCallback(info sqlite3.TraceInfo) int {
 		modeText = "+Tx+"
 	}
 
-	fmt.Printf("Trace: ev %d %s conn 0x%x, stmt 0x%x {%q}%s%s%s\n",
+	fmt.Printf("Trace: ev %d %s conn 0x%x, stmt 0x%x%s%s%s%s\n",
 		info.EventCode, modeText, info.ConnHandle, info.StmtHandle,
-		info.StmtOrTrigger, expandedText,
+		stmtOrTrigText, expandedText,
 		runTimeText,
 		dbErrText)
 	return 0
@@ -95,7 +113,7 @@ func main() {
 			ConnectHook: func(conn *sqlite3.SQLiteConn) error {
 				err := conn.SetTrace(&sqlite3.TraceConfig{
 					Callback:        traceCallback,
-					EventMask:       uint(eventMask),
+					EventMask:       uint32(eventMask),
 					WantExpandedSQL: true,
 				})
 				return err
@@ -170,7 +188,7 @@ func dbSetup(db *sql.DB) {
 }
 
 func dbDoInsert(db *sql.DB) {
-	const Descr = "DB-Exec"
+	const Descr = "Ins-DB-Exec"
 	for i := 0; i < nGenRows; i++ {
 		result, err := db.Exec(insertDML, textPrefix+Descr)
 		if err != nil {
@@ -182,7 +200,7 @@ func dbDoInsert(db *sql.DB) {
 }
 
 func dbDoInsertPrepared(db *sql.DB) {
-	const Descr = "DB-Prepare"
+	const Descr = "Ins-DB-Prepare"
 
 	stmt, err := db.Prepare(insertDML)
 	if err != nil {
@@ -214,7 +232,7 @@ func resultDoCheck(result sql.Result, callerDescr string, callIndex int) {
 }
 
 func dbDoSelect(db *sql.DB) {
-	const Descr = "DB-Query"
+	const Descr = "Sel-DB-Query"
 
 	rows, err := db.Query(selectDML, noteTextPattern)
 	if err != nil {
@@ -226,7 +244,7 @@ func dbDoSelect(db *sql.DB) {
 }
 
 func dbDoSelectPrepared(db *sql.DB) {
-	const Descr = "DB-Prepare"
+	const Descr = "Sel-DB-Prepare"
 
 	stmt, err := db.Prepare(selectDML)
 	if err != nil {
