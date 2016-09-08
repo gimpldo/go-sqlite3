@@ -3,6 +3,7 @@
 //
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file.
+// +build trace
 
 package sqlite3
 
@@ -85,7 +86,7 @@ func fillExpandedSQL(info *TraceInfo, db *C.sqlite3, pStmt unsafe.Pointer) {
 		panic("No SQLite statement pointer in P arg of trace_v2 callback")
 	}
 
-	expSQLiteCStr := C.sqlite3_expanded_sql(pStmt)
+	expSQLiteCStr := C.sqlite3_expanded_sql((*C.sqlite3_stmt)(pStmt))
 	if expSQLiteCStr == nil {
 		fillDBError(&info.DBError, db)
 		return
