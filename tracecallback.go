@@ -1,5 +1,5 @@
-// Copyright (C) 2016 Yasuhiro Matsumoto <mattn.jp@gmail.com>.
-// TODO: add "Gimpl do foo" team?
+// Copyright (C) 2016 Yasuhiro Matsumoto <mattn.jp@gmail.com>,
+//     Gimpl do foo <gimpldo@gmail.com>
 //
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file.
@@ -13,7 +13,6 @@ package sqlite3
 #else
 #include <sqlite3.h>
 #endif
-#include <stdlib.h>
 */
 import "C"
 
@@ -69,16 +68,19 @@ type TraceInfo struct {
 type TraceUserCallback func(TraceInfo) int
 
 type TraceConfig struct {
-	Callback        TraceUserCallback
-	EventMask       uint32
-	WantExpandedSQL bool
+	Callback         TraceUserCallback
+	EventMask        uint32
+	WantExpandedSQL  bool
+	WantSQLiteErrMsg bool
 }
 
-func fillDBError(dbErr *Error, db *C.sqlite3) {
+func fillDBError(dbErr *Error, db *C.sqlite3, wantErrMsg bool) {
 	// See SQLiteConn.lastError(), in file 'sqlite3.go' at the time of writing (Sept 5, 2016)
 	dbErr.Code = ErrNo(C.sqlite3_errcode(db))
 	dbErr.ExtendedCode = ErrNoExtended(C.sqlite3_extended_errcode(db))
-	dbErr.err = C.GoString(C.sqlite3_errmsg(db))
+	if wantErrMsg {
+		dbErr.err = C.GoString(C.sqlite3_errmsg(db))
+	}
 }
 
 func fillExpandedSQL(info *TraceInfo, db *C.sqlite3, pStmt unsafe.Pointer) {
@@ -88,7 +90,11 @@ func fillExpandedSQL(info *TraceInfo, db *C.sqlite3, pStmt unsafe.Pointer) {
 
 	expSQLiteCStr := C.sqlite3_expanded_sql((*C.sqlite3_stmt)(pStmt))
 	if expSQLiteCStr == nil {
-		fillDBError(&info.DBError, db)
+		// This problem (failure to expand SQL) seems quite unlikely,
+		// so always fill err = sqlite3_errmsg().
+		// Also, passing the config value 'WantSQLiteErrMsg'
+		// through fillExpandedSQL() would make the code more complex.
+		fillDBError(&info.DBError, db, true)
 		return
 	}
 	info.ExpandedSQL = C.GoString(expSQLiteCStr)
@@ -103,6 +109,8 @@ func traceCallbackTrampoline(
 	p unsafe.Pointer,
 	// Parameter named 'X' in SQLite docs (eXtra event data?):
 	xValue unsafe.Pointer) int {
+
+	//fmt.Printf("traceCallbackTrampoline(t=%d, c=%p, p=%p, x=%p)\n", traceEventCode, ctx, p, xValue)
 
 	if ctx == nil {
 		panic(fmt.Sprintf("No context (ev 0x%x)", traceEventCode))
@@ -169,13 +177,13 @@ func traceCallbackTrampoline(
 		info.RunTimeNanosec = *(*int64)(xValue)
 
 		// sample the error //TODO: is it safe? is it useful?
-		fillDBError(&info.DBError, contextDB)
+		fillDBError(&info.DBError, contextDB, traceConf.WantSQLiteErrMsg)
 
 	case TraceRow:
 		info.StmtHandle = uintptr(p)
 
 		// sample the error //TODO: is it safe? is it useful?
-		fillDBError(&info.DBError, contextDB)
+		fillDBError(&info.DBError, contextDB, traceConf.WantSQLiteErrMsg)
 
 	case TraceClose:
 		handle := uintptr(p)
@@ -203,19 +211,6 @@ type traceMapEntry struct {
 var traceMapLock sync.Mutex
 var traceMap = make(map[uintptr]traceMapEntry)
 
-func addTraceMapping(connHandle uintptr, traceConf TraceConfig) {
-	traceMapLock.Lock()
-	defer traceMapLock.Unlock()
-
-	oldEntryCopy, found := traceMap[connHandle]
-	if found {
-		panic(fmt.Sprintf("Adding trace config %v: handle 0x%x already registered (%v).",
-			traceConf, connHandle, oldEntryCopy.config))
-	}
-	traceMap[connHandle] = traceMapEntry{config: traceConf}
-	fmt.Printf("Added trace config %v: handle 0x%x.\n", traceConf, connHandle)
-}
-
 func lookupTraceMapping(connHandle uintptr) (TraceConfig, bool) {
 	traceMapLock.Lock()
 	defer traceMapLock.Unlock()
@@ -232,7 +227,7 @@ func popTraceMapping(connHandle uintptr) (TraceConfig, bool) {
 	entryCopy, found := traceMap[connHandle]
 	if found {
 		delete(traceMap, connHandle)
-		fmt.Printf("Pop handle 0x%x: deleted trace config %v.\n", connHandle, entryCopy.config)
+		//fmt.Printf("Pop handle 0x%x: deleted trace config %v.\n", connHandle, entryCopy.config)
 	}
 	return entryCopy.config, found
 }

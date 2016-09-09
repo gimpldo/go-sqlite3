@@ -1,5 +1,5 @@
-// Copyright (C) 2016 Yasuhiro Matsumoto <mattn.jp@gmail.com>.
-// TODO: add "Gimpl do foo" team?
+// Copyright (C) 2016 Yasuhiro Matsumoto <mattn.jp@gmail.com>,
+//     Gimpl do foo <gimpldo@gmail.com>
 //
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file.
@@ -28,10 +28,13 @@ import "unsafe"
 func (c *SQLiteConn) SetTrace(requested *TraceConfig) error {
 	connHandle := uintptr(unsafe.Pointer(c.db))
 
-	_, _ = popTraceMapping(connHandle)
+	traceMapLock.Lock()
+	defer traceMapLock.Unlock()
+
+	delete(traceMap, connHandle)
 
 	if requested == nil || requested.EventMask == 0 || requested.Callback == nil {
-		// The traceMap entry was deleted already by popTraceMapping():
+		// The traceMap entry was deleted already;
 		// can disable all events now, no need to watch for TraceClose.
 		err := c.setSQLiteTrace(0)
 		return err
@@ -46,7 +49,9 @@ func (c *SQLiteConn) SetTrace(requested *TraceConfig) error {
 		reqCopy.WantExpandedSQL = false
 	}
 
-	addTraceMapping(connHandle, reqCopy)
+	traceMap[connHandle] = traceMapEntry{config: reqCopy}
+
+	//fmt.Printf("Added trace config %v: handle 0x%x.\n", reqCopy, connHandle)
 
 	// The callback trampoline function does cleanup on Close event,
 	// regardless of the presence or absence of the user callback.
