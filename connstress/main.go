@@ -15,7 +15,6 @@ import (
 	"os/signal"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	sqlite3 "github.com/gimpldo/go-sqlite3"
@@ -223,11 +222,7 @@ func main() {
 	}
 
 	sig_chan := make(chan os.Signal, 1)
-	signal.Notify(sig_chan,
-		syscall.SIGHUP,
-		syscall.SIGINT,
-		syscall.SIGTERM,
-		syscall.SIGQUIT)
+	signal.Notify(sig_chan, os.Interrupt)
 	select {
 	case s := <-sig_chan:
 		log.Printf("Signal received: %v\n", s)
