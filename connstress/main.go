@@ -46,9 +46,6 @@ type sqliteConnStressState struct {
 
 	conn *sqlite3.SQLiteConn
 
-	// used in some tests, not all:
-	preparedStmt driver.Stmt
-
 	wg   *sync.WaitGroup
 	done <-chan struct{}
 }
@@ -80,26 +77,7 @@ func (cs *sqliteConnStressState) exec(query string) {
 	}
 }
 
-func (cs *sqliteConnStressState) prepare(query string) {
-	var err error
-	cs.preparedStmt, err = cs.conn.Prepare(query)
-	if err != nil {
-		log.Panicf("[%s] Failed to prepare statement (%q): %#v\n", cs.name, query, err)
-	}
-}
-
-// execPreparedStmt is intended to be run in a loop, for stress testing.
-func (cs *sqliteConnStressState) execPreparedStmt() {
-	cs.preparedStmt.Exec(nil)
-	// Ignoring results or errors, for convenience and execution speed.
-	// This is intended for stress test, not a functional test.
-}
-
 func (cs *sqliteConnStressState) cleanup() {
-	if cs.preparedStmt != nil {
-		cs.preparedStmt.Close()
-		log.Printf("[%s] Closed prepared statement.\n", cs.name)
-	}
 	if cs.conn != nil {
 		cs.conn.Close()
 		log.Printf("[%s] Closed database connection.\n", cs.name)
@@ -126,9 +104,14 @@ func (cs *sqliteConnStressState) stressUsingPreparedStmt(id int) {
 	defer cs.wg.Done()
 
 	cs.exec("CREATE TABLE IF NOT EXISTS t1 (dummy VARCHAR)")
+	query := "DELETE FROM t1"
+	// We are using an in-memory database anyway, no one will be hurt.
 
-	// We are using an in-memory database anyway, no one will be hurt:
-	cs.prepare("DELETE FROM t1")
+	stmt, err := cs.conn.Prepare(query)
+	if err != nil {
+		log.Panicf("[%s] Failed to prepare statement (%q): %#v\n", cs.name, query, err)
+	}
+	defer stmt.Close()
 
 	var n int
 	for {
@@ -137,7 +120,43 @@ func (cs *sqliteConnStressState) stressUsingPreparedStmt(id int) {
 			log.Printf("[%s_%d] SQL ops stress loop done after %d iterations", cs.name, id, n)
 			return
 		default:
-			cs.execPreparedStmt()
+			stmt.Exec(nil)
+			// Ignoring results or errors, for convenience and execution speed.
+			// This is intended for stress test, not a functional test.
+			n++
+		}
+	}
+}
+
+func (cs *sqliteConnStressState) stressUsingPreparedStmtInTx(id int) {
+	defer cs.wg.Done()
+
+	cs.exec("CREATE TABLE IF NOT EXISTS t1 (dummy VARCHAR)")
+	query := "DELETE FROM t1"
+	// We are using an in-memory database anyway, no one will be hurt.
+
+	tx, err := cs.conn.Begin()
+	if err != nil {
+		log.Panicf("[%s] Failed to begin Tx: %#v\n", cs.name, err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := cs.conn.Prepare(query)
+	if err != nil {
+		log.Panicf("[%s] Failed to prepare statement in Tx (%q): %#v\n", cs.name, query, err)
+	}
+	defer stmt.Close()
+
+	var n int
+	for {
+		select {
+		case <-cs.done:
+			log.Printf("[%s_%d] SQL Tx ops stress loop done after %d iterations", cs.name, id, n)
+			return
+		default:
+			stmt.Exec(nil)
+			// Ignoring results or errors, for convenience and execution speed.
+			// This is intended for stress test, not a functional test.
 			n++
 		}
 	}
@@ -145,6 +164,7 @@ func (cs *sqliteConnStressState) stressUsingPreparedStmt(id int) {
 
 var nSetTraceGoroPerConn int
 var nSQLOpsGoroPerConn int
+var nSQLTxOpsGoroPerConn int
 
 func (cs *sqliteConnStressState) startStress(wg *sync.WaitGroup, done <-chan struct{}) {
 	if cs.conn == nil {
@@ -174,6 +194,12 @@ func (cs *sqliteConnStressState) startStress(wg *sync.WaitGroup, done <-chan str
 		nStarted++
 	}
 
+	for i := 0; i < nSQLTxOpsGoroPerConn; i++ {
+		cs.wg.Add(1)
+		go cs.stressUsingPreparedStmtInTx(i)
+		nStarted++
+	}
+
 	log.Printf("[%s] Started %d stress loops.\n", cs.name, nStarted)
 }
 
@@ -183,6 +209,7 @@ func main() {
 
 	flag.IntVar(&nSetTraceGoroPerConn, "settrace", 1, "Number of goroutines with SetTrace calls to start for each connection")
 	flag.IntVar(&nSQLOpsGoroPerConn, "sqlop", 1, "Number of goroutines with SQL operations to start for each connection")
+	flag.IntVar(&nSQLTxOpsGoroPerConn, "sqltxop", 1, "Number of goroutines with SQL transaction operations to start for each connection")
 
 	flag.Parse()
 
@@ -200,13 +227,13 @@ func main() {
 
 	conns := make([]*sqliteConnStressState, nConns)
 
-	for i := 0; i < len(conns); i++ {
+	for i := range conns {
 		driver := drivers[1]
 		//driver := drivers[1]
 		//driver := drivers[i%nDrivers]
 
-		// This is first loop: we need to create instances;
-		// for the following loops, 'range' will work as expected
+		// This is first loop: we need to create the instances
+		// that will do the work in the following loops.
 		c := &sqliteConnStressState{}
 		c.open(driver, fmt.Sprintf("conn%d", i))
 		conns[i] = c
