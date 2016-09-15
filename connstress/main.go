@@ -2,6 +2,7 @@
 //
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file.
+
 // +build trace
 
 package main
@@ -13,6 +14,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime/pprof"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -80,91 +82,155 @@ func (cs *sqliteConnStressState) exec(query string) {
 func (cs *sqliteConnStressState) cleanup() {
 	if cs.conn != nil {
 		cs.conn.Close()
+		cs.conn = nil
 		log.Printf("[%s] Closed database connection.\n", cs.name)
 	}
 }
 
-func (cs *sqliteConnStressState) stressUsingSetTrace(id int) {
-	defer cs.wg.Done()
-	var n int
-	for {
-		select {
-		case <-cs.done:
-			log.Printf("[%s_%d] SetTrace() stress loop done after %d iterations", cs.name, id, n)
-			return
-		default:
-			cs.conn.SetTrace(nil)
-			cs.conn.SetTrace(traceConf)
-			n++
-		}
-	}
+type stressorDescr struct {
+	flagName  string
+	flagUsage string
+
+	// Number of Goroutines to be started (changeable via command line arg);
+	// its initial value will be used as default by the 'flag' package:
+	nGoroutines int
+
+	// 'goroIx' stands for "Goroutine Index"
+	loopFunc func(cs *sqliteConnStressState, goroIx int)
 }
 
-func (cs *sqliteConnStressState) stressUsingPreparedStmt(id int) {
-	defer cs.wg.Done()
+var stressors = [...]stressorDescr{
+	stressorDescr{
+		flagName:    "traceflip",
+		flagUsage:   "Number of goroutines with SetTrace calls to start for each connection",
+		nGoroutines: 0,
+		loopFunc: func(cs *sqliteConnStressState, goroIx int) {
+			defer cs.wg.Done()
+			var n int
+			for {
+				select {
+				case <-cs.done:
+					log.Printf("[%s_%d] SetTrace() stress loop done after %d iterations", cs.name, goroIx, n)
+					return
+				default:
+					cs.conn.SetTrace(nil)
+					cs.conn.SetTrace(traceConf)
+					n++
+				}
+			}
+		},
+	},
+	stressorDescr{
+		flagName:    "tracedisable",
+		flagUsage:   "Number of goroutines with SetTrace(nil) calls to start for each connection",
+		nGoroutines: 0,
+		loopFunc: func(cs *sqliteConnStressState, goroIx int) {
+			defer cs.wg.Done()
+			var n int
+			for {
+				select {
+				case <-cs.done:
+					log.Printf("[%s_%d] SetTrace(nil) stress loop done after %d iterations", cs.name, goroIx, n)
+					return
+				default:
+					cs.conn.SetTrace(nil)
+					n++
+				}
+			}
+		},
+	},
+	stressorDescr{
+		flagName:    "traceinstall",
+		flagUsage:   "Number of goroutines with SetTrace(conf) calls to start for each connection",
+		nGoroutines: 0,
+		loopFunc: func(cs *sqliteConnStressState, goroIx int) {
+			defer cs.wg.Done()
+			var n int
+			for {
+				select {
+				case <-cs.done:
+					log.Printf("[%s_%d] SetTrace(conf) stress loop done after %d iterations", cs.name, goroIx, n)
+					return
+				default:
+					cs.conn.SetTrace(traceConf)
+					n++
+				}
+			}
+		},
+	},
+	stressorDescr{
+		flagName:    "sqlop",
+		flagUsage:   "Number of goroutines with SQL operations to start for each connection",
+		nGoroutines: 0,
+		loopFunc: func(cs *sqliteConnStressState, goroIx int) {
+			defer cs.wg.Done()
 
-	cs.exec("CREATE TABLE IF NOT EXISTS t1 (dummy VARCHAR)")
-	query := "DELETE FROM t1"
-	// We are using an in-memory database anyway, no one will be hurt.
+			cs.exec("CREATE TABLE IF NOT EXISTS t1 (dummy VARCHAR)")
+			query := "DELETE FROM t1"
+			// We are using an in-memory database anyway, no one will be hurt.
 
-	stmt, err := cs.conn.Prepare(query)
-	if err != nil {
-		log.Panicf("[%s] Failed to prepare statement (%q): %#v\n", cs.name, query, err)
-	}
-	defer stmt.Close()
+			stmt, err := cs.conn.Prepare(query)
+			if err != nil {
+				log.Panicf("[%s] Failed to prepare statement (%q): %#v\n", cs.name, query, err)
+			}
+			defer stmt.Close()
 
-	var n int
-	for {
-		select {
-		case <-cs.done:
-			log.Printf("[%s_%d] SQL ops stress loop done after %d iterations", cs.name, id, n)
-			return
-		default:
-			stmt.Exec(nil)
-			// Ignoring results or errors, for convenience and execution speed.
-			// This is intended for stress test, not a functional test.
-			n++
-		}
-	}
+			var n int
+			for {
+				select {
+				case <-cs.done:
+					log.Printf("[%s_%d] SQL ops stress loop done after %d iterations; trace calls counter=%d.",
+						cs.name, goroIx, n, atomic.LoadUint64(&nTraceCalls))
+					return
+				default:
+					stmt.Exec(nil)
+					// Ignoring results or errors, for convenience and execution speed.
+					// This is intended for stress test, not a functional test.
+					n++
+				}
+			}
+		},
+	},
+	stressorDescr{
+		flagName:    "sqltxop",
+		flagUsage:   "Number of goroutines with SQL transaction operations to start for each connection",
+		nGoroutines: 0,
+		loopFunc: func(cs *sqliteConnStressState, goroIx int) {
+			defer cs.wg.Done()
+
+			cs.exec("CREATE TABLE IF NOT EXISTS t1 (dummy VARCHAR)")
+			query := "DELETE FROM t1"
+			// We are using an in-memory database anyway, no one will be hurt.
+
+			tx, err := cs.conn.Begin()
+			if err != nil {
+				log.Panicf("[%s] Failed to begin Tx: %#v\n", cs.name, err)
+			}
+			defer tx.Rollback()
+
+			stmt, err := cs.conn.Prepare(query)
+			if err != nil {
+				log.Panicf("[%s] Failed to prepare statement in Tx (%q): %#v\n", cs.name, query, err)
+			}
+			defer stmt.Close()
+
+			var n int
+			for {
+				select {
+				case <-cs.done:
+					log.Printf("[%s_%d] SQL Tx ops stress loop done after %d iterations; trace calls counter=%d.",
+						cs.name, goroIx, n, atomic.LoadUint64(&nTraceCalls))
+					return
+				default:
+					stmt.Exec(nil)
+					// Ignoring results or errors, for convenience and execution speed.
+					// This is intended for stress test, not a functional test.
+					n++
+				}
+			}
+		},
+	},
 }
-
-func (cs *sqliteConnStressState) stressUsingPreparedStmtInTx(id int) {
-	defer cs.wg.Done()
-
-	cs.exec("CREATE TABLE IF NOT EXISTS t1 (dummy VARCHAR)")
-	query := "DELETE FROM t1"
-	// We are using an in-memory database anyway, no one will be hurt.
-
-	tx, err := cs.conn.Begin()
-	if err != nil {
-		log.Panicf("[%s] Failed to begin Tx: %#v\n", cs.name, err)
-	}
-	defer tx.Rollback()
-
-	stmt, err := cs.conn.Prepare(query)
-	if err != nil {
-		log.Panicf("[%s] Failed to prepare statement in Tx (%q): %#v\n", cs.name, query, err)
-	}
-	defer stmt.Close()
-
-	var n int
-	for {
-		select {
-		case <-cs.done:
-			log.Printf("[%s_%d] SQL Tx ops stress loop done after %d iterations", cs.name, id, n)
-			return
-		default:
-			stmt.Exec(nil)
-			// Ignoring results or errors, for convenience and execution speed.
-			// This is intended for stress test, not a functional test.
-			n++
-		}
-	}
-}
-
-var nSetTraceGoroPerConn int
-var nSQLOpsGoroPerConn int
-var nSQLTxOpsGoroPerConn int
 
 func (cs *sqliteConnStressState) startStress(wg *sync.WaitGroup, done <-chan struct{}) {
 	if cs.conn == nil {
@@ -182,55 +248,60 @@ func (cs *sqliteConnStressState) startStress(wg *sync.WaitGroup, done <-chan str
 
 	var nStarted int
 
-	for i := 0; i < nSetTraceGoroPerConn; i++ {
-		cs.wg.Add(1)
-		go cs.stressUsingSetTrace(i)
-		nStarted++
-	}
-
-	for i := 0; i < nSQLOpsGoroPerConn; i++ {
-		cs.wg.Add(1)
-		go cs.stressUsingPreparedStmt(i)
-		nStarted++
-	}
-
-	for i := 0; i < nSQLTxOpsGoroPerConn; i++ {
-		cs.wg.Add(1)
-		go cs.stressUsingPreparedStmtInTx(i)
-		nStarted++
+	for stressorIx := range stressors {
+		for i := 0; i < stressors[stressorIx].nGoroutines; i++ {
+			cs.wg.Add(1)
+			go stressors[stressorIx].loopFunc(cs, i)
+			nStarted++
+		}
 	}
 
 	log.Printf("[%s] Started %d stress loops.\n", cs.name, nStarted)
 }
 
 func main() {
+	var cpuProfileFilename string
+	var memProfileFilename string
+	flag.StringVar(&cpuProfileFilename, "cpuprofile", "", "Write CPU profile to file")
+	flag.StringVar(&memProfileFilename, "memprofile", "", "Write memory profile to file")
+
 	var nConns int
 	flag.IntVar(&nConns, "nconns", 1, "Number of SQLite database connections to open")
 
-	flag.IntVar(&nSetTraceGoroPerConn, "settrace", 1, "Number of goroutines with SetTrace calls to start for each connection")
-	flag.IntVar(&nSQLOpsGoroPerConn, "sqlop", 1, "Number of goroutines with SQL operations to start for each connection")
-	flag.IntVar(&nSQLTxOpsGoroPerConn, "sqltxop", 1, "Number of goroutines with SQL transaction operations to start for each connection")
+	for stressorIx := range stressors {
+		flag.IntVar(&stressors[stressorIx].nGoroutines,
+			stressors[stressorIx].flagName,
+			stressors[stressorIx].nGoroutines,
+			stressors[stressorIx].flagUsage)
+	}
 
 	flag.Parse()
 
-	const nDrivers = 2
-	var drivers [nDrivers]*sqlite3.SQLiteDriver
-	drivers[0] = &sqlite3.SQLiteDriver{}
-	drivers[1] = &sqlite3.SQLiteDriver{
-		ConnectHook: func(conn *sqlite3.SQLiteConn) error {
-			err := conn.SetTrace(traceConf)
-			return err
+	if cpuProfileFilename != "" {
+		f, err := os.Create(cpuProfileFilename)
+		if err != nil {
+			panic(err)
+		}
+		pprof.StartCPUProfile(f)
+	}
+
+	drivers := [...]*sqlite3.SQLiteDriver{
+		&sqlite3.SQLiteDriver{},
+		&sqlite3.SQLiteDriver{
+			ConnectHook: func(conn *sqlite3.SQLiteConn) error {
+				err := conn.SetTrace(traceConf)
+				return err
+			},
 		},
 	}
-	// sql.Register("sqlite3_tracing", sqliteDriver) // not needed,
+	// sql.Register("sqlite3_tracing", sqliteDriver[1]) // not needed,
 	// because we don't use the standard Go database/sql API
 
 	conns := make([]*sqliteConnStressState, nConns)
 
 	for i := range conns {
 		driver := drivers[1]
-		//driver := drivers[1]
-		//driver := drivers[i%nDrivers]
+		//driver := drivers[i%len(drivers)]
 
 		// This is first loop: we need to create the instances
 		// that will do the work in the following loops.
@@ -258,17 +329,28 @@ func main() {
 	}
 	signal.Stop(sig_chan)
 
-	log.Printf("(number of trace calls: %d) Broadcasting cancellation by closing 'done' chan...\n", atomic.LoadUint64(&nTraceCalls))
+	if cpuProfileFilename != "" {
+		pprof.StopCPUProfile()
+	}
+
+	if memProfileFilename != "" {
+		f, err := os.Create(memProfileFilename)
+		if err != nil {
+			panic(err)
+		}
+		pprof.WriteHeapProfile(f)
+		log.Printf("(trace calls counter=%d) Wrote memory profile to file '%s'.\n", atomic.LoadUint64(&nTraceCalls), memProfileFilename)
+	}
+
+	log.Printf("(trace calls counter=%d) Broadcasting cancellation by closing 'done' chan...\n", atomic.LoadUint64(&nTraceCalls))
 	close(done)
 
-	log.Printf("(number of trace calls: %d) Waiting...\n", atomic.LoadUint64(&nTraceCalls))
+	log.Printf("(trace calls counter=%d) Waiting...\n", atomic.LoadUint64(&nTraceCalls))
 	wg.Wait()
 
 	for _, c := range conns {
 		c.cleanup()
 	}
 
-	log.Printf("Finished; number of trace calls: %d\n", atomic.LoadUint64(&nTraceCalls))
-
-	os.Exit(0)
+	log.Printf("Finished; trace calls counter=%d.\n", atomic.LoadUint64(&nTraceCalls))
 }
