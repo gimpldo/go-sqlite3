@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/pprof"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -97,6 +98,16 @@ type stressorDescr struct {
 
 	// 'goroIx' stands for "Goroutine Index"
 	loopFunc func(cs *sqliteConnStressState, goroIx int)
+}
+
+func listStressors() string {
+	sf := []string{} // 'sf' stands for "String Fragments"
+	for _, descr := range stressors {
+		if descr.nGoroutines != 0 {
+			sf = append(sf, fmt.Sprintf("%s=%d", descr.flagName, descr.nGoroutines))
+		}
+	}
+	return "-" + strings.Join(sf, " -")
 }
 
 var stressors = [...]stressorDescr{
@@ -352,5 +363,5 @@ func main() {
 		c.cleanup()
 	}
 
-	log.Printf("Finished; trace calls counter=%d.\n", atomic.LoadUint64(&nTraceCalls))
+	log.Printf("Finished (-nconns=%d %s); trace calls counter=%d.\n", nConns, listStressors(), atomic.LoadUint64(&nTraceCalls))
 }
