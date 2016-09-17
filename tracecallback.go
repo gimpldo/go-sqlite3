@@ -208,14 +208,20 @@ type traceMapEntry struct {
 	config TraceConfig
 }
 
-var traceMapLock sync.Mutex
-var traceMap = make(map[uintptr]traceMapEntry)
+var (
+	traceMapLock sync.Mutex
+	traceMap     = make(map[uintptr]traceMapEntry)
+)
 
 func lookupTraceMapping(connHandle uintptr) (TraceConfig, bool) {
+	// Avoiding 'defer' makes this map lookup consistently faster:
+	// counted 5% to 30% more iterations in same interval (20 sec) when
+	// Exec()'ing a prepared statement without parameters in a tight loop;
+	// speedup increases with the number of SQLite database connections
+	// used concurrently (opened and not closed yet).
 	traceMapLock.Lock()
-	defer traceMapLock.Unlock()
-
 	entryCopy, found := traceMap[connHandle]
+	traceMapLock.Unlock()
 	return entryCopy.config, found
 }
 
