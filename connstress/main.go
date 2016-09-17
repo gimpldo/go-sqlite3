@@ -82,6 +82,7 @@ func (cs *sqliteConnStressState) exec(query string) {
 
 func (cs *sqliteConnStressState) cleanup() {
 	if cs.conn != nil {
+		log.Printf("[%s] Closing database connection...\n", cs.name)
 		cs.conn.Close()
 		cs.conn = nil
 		log.Printf("[%s] Closed database connection.\n", cs.name)
