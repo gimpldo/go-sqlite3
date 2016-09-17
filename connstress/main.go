@@ -100,14 +100,21 @@ type stressorDescr struct {
 	loopFunc func(cs *sqliteConnStressState, goroIx int)
 }
 
+// listStressors shows the number of goroutines per connection
+// requested for each kind of stressor (skipping the zeros).
+// This is not necessarily same as the command line flags specified;
+// they match only if the initial value (flag's default value) is zero.
+// Therefore listStressors does not format these numbers as if they were
+// on the command line, to avoid misleading the user --- in the general case,
+// its output cannot be used directly to reproduce a test run.
 func listStressors() string {
 	sf := []string{} // 'sf' stands for "String Fragments"
 	for _, descr := range stressors {
 		if descr.nGoroutines != 0 {
-			sf = append(sf, fmt.Sprintf("%s=%d", descr.flagName, descr.nGoroutines))
+			sf = append(sf, fmt.Sprintf("%d %s", descr.nGoroutines, descr.flagName))
 		}
 	}
-	return "-" + strings.Join(sf, " -")
+	return strings.Join(sf, " + ")
 }
 
 var stressors = [...]stressorDescr{
@@ -363,5 +370,5 @@ func main() {
 		c.cleanup()
 	}
 
-	log.Printf("Finished (-nconns=%d %s); trace calls counter=%d.\n", nConns, listStressors(), atomic.LoadUint64(&nTraceCalls))
+	log.Printf("Finished for %d conn * (%s); trace calls counter=%d.\n", nConns, listStressors(), atomic.LoadUint64(&nTraceCalls))
 }
